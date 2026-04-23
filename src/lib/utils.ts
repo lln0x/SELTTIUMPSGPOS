@@ -10,6 +10,10 @@ export function formatCurrency(amount: number | null | undefined, currency: stri
   return `${currency} ${value.toFixed(2)}`;
 }
 
+export function roundTo2Decimals(num: number): number {
+  return Math.round((num + Number.EPSILON) * 100) / 100;
+}
+
 export function generateProductCode(prefix: string, count: number) {
   return `${prefix}${String(count + 1).padStart(3, '0')}`;
 }

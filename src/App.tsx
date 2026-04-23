@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { 
-  LayoutDashboard, 
   ShoppingCart, 
   Package, 
   Tags, 
@@ -32,7 +31,6 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from './lib/utils';
 import { AppSettings } from './types';
-import Dashboard from './components/Dashboard';
 import POS from './components/POS';
 import Inventory from './components/Inventory';
 import Categories from './components/Categories';
@@ -46,7 +44,9 @@ import CashFlow from './components/CashFlow';
 import DeveloperMode from './components/DeveloperMode';
 import { useDataSync } from './hooks/useDataSync';
 
-type Section = 'dashboard' | 'pos' | 'inventory' | 'categories' | 'suppliers' | 'customers' | 'reports' | 'settings' | 'sales_records' | 'users' | 'dev_mode' | 'cash_flow';
+import { apiFetch } from './lib/api';
+
+type Section = 'pos' | 'inventory' | 'categories' | 'suppliers' | 'customers' | 'reports' | 'settings' | 'sales_records' | 'users' | 'dev_mode' | 'cash_flow';
 
 function ContactModal({ isOpen, onClose, settings }: { isOpen: boolean, onClose: () => void, settings: AppSettings | null }) {
   if (!isOpen) return null;
@@ -230,13 +230,14 @@ function LoginScreen({ onLogin, onStartDemo, isDemoExpired }: { onLogin: (user: 
     setError('');
 
     try {
-      const res = await fetch('/api/auth/login', {
+      const res = await apiFetch('/api/auth/login', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password })
       });
       const data = await res.json();
       if (data.success) {
+        if (data.token) localStorage.setItem('token', data.token);
+        localStorage.setItem('user', JSON.stringify(data.user));
         onLogin(data.user);
       } else {
         setError(data.message || 'Credenciales incorrectas');
@@ -301,7 +302,7 @@ function LoginScreen({ onLogin, onStartDemo, isDemoExpired }: { onLogin: (user: 
 }
 
 export default function App() {
-  const [activeSection, setActiveSection] = useState<Section>('dashboard');
+  const [activeSection, setActiveSection] = useState<Section>('pos');
   const [inventoryCategoryFilter, setInventoryCategoryFilter] = useState<number | 'all'>('all');
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isMobile, setIsMobile] = useState(false);
@@ -315,32 +316,77 @@ export default function App() {
 
   const isDemoUser = user?.email === 'demo';
 
+  // Listen for unauthorized events from apiFetch
   useEffect(() => {
-    if (user) {
-      if (user.role === 'DESARROLLADOR' && !['users', 'dev_mode'].includes(activeSection)) {
-        setActiveSection('users');
-      } else if (user.role === 'ESTANDARD' && !isDemoUser && !['dashboard', 'pos', 'reports', 'customers'].includes(activeSection)) {
-        setActiveSection('dashboard');
+    const handleUnauthorized = () => {
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      setIsLoggedIn(false);
+      setUser(null);
+    };
+    window.addEventListener('unauthorized', handleUnauthorized);
+    return () => window.removeEventListener('unauthorized', handleUnauthorized);
+  }, []);
+
+  const checkSession = async () => {
+    const token = localStorage.getItem('token');
+    const storedUser = localStorage.getItem('user');
+    
+    if (token && storedUser) {
+      try {
+        const res = await apiFetch('/api/auth/me');
+        if (res.ok) {
+          const data = await res.json();
+          setUser(data.user);
+          setIsLoggedIn(true);
+        } else {
+          localStorage.removeItem('token');
+          localStorage.removeItem('user');
+        }
+      } catch (err) {
+        console.error('Session verification failed');
       }
     }
-  }, [user, activeSection, isDemoUser]);
+    setIsLoading(false);
+  };
 
   const fetchSettings = async () => {
     try {
-      const res = await fetch('/api/settings');
+      const res = await apiFetch('/api/settings');
       const data = await res.json();
       setSettings(data);
-      setIsLoading(false);
     } catch (err) {
       console.error('Error fetching settings:', err);
-      setIsLoading(false);
     }
   };
 
   useEffect(() => {
+    if (user) {
+      if (user.role === 'DESARROLLADOR' && !['users', 'dev_mode'].includes(activeSection)) {
+        setActiveSection('users');
+      } else if (user.role === 'ESTANDARD' && !isDemoUser && !['pos', 'reports', 'customers'].includes(activeSection)) {
+        setActiveSection('pos');
+      }
+    }
+  }, [user, activeSection, isDemoUser]);
+
+  useEffect(() => {
     fetchSettings();
+    checkSession();
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
-    return () => clearInterval(timer);
+    
+    // Debug helper: Press 'D' to expire demo
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'D' && e.shiftKey) {
+        setSettings(prev => prev ? { ...prev, demo_start_date: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString() } : null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
   }, []);
 
   useDataSync(fetchSettings);
@@ -355,16 +401,21 @@ export default function App() {
   }, [settings]);
 
   const getDemoSecondsLeft = () => {
-    if (settings?.activation_status !== 'demo' && !isDemoUser) return 0;
-    const DEMO_DURATION_SECONDS = 10 * 24 * 60 * 60; // 10 days
+    // Only show demo counter if app is in demo mode OR it's the specific demo user
+    if (settings?.activation_status !== 'demo' && user?.email !== 'demo') return 0;
     
-    // Prioritize demo_start_date for the demo user, fallback to installation_date
+    // Default to 168 hours (7 days) if not set in settings
+    const demoDurationHours = parseFloat(settings?.demo_duration_hours || '168');
+    const DEMO_DURATION_SECONDS = Math.floor(demoDurationHours * 3600); 
+    
+    // Use demo_start_date if available, fallback to installation_date
     const referenceDateStr = settings?.demo_start_date || settings?.installation_date;
     if (!referenceDateStr) return DEMO_DURATION_SECONDS;
     
     const startDate = new Date(referenceDateStr);
     const diffTime = currentTime.getTime() - startDate.getTime();
     const diffSeconds = Math.floor(diffTime / 1000);
+    
     return Math.max(0, DEMO_DURATION_SECONDS - diffSeconds);
   };
 
@@ -381,21 +432,20 @@ export default function App() {
     const mins = Math.floor((seconds % (60 * 60)) / 60);
     const secs = seconds % 60;
     
-    if (days > 0) return `${days}d ${hours}h ${mins}m`;
+    if (days > 0) return `${days}d ${hours}h ${mins}m ${secs}s`;
     if (hours > 0) return `${hours}h ${mins}m ${secs}s`;
     return `${mins}m ${secs}s`;
   };
 
   const isDemoVoucherLimitReached = settings?.activation_status === 'demo' && (settings?.voucher_count || 0) >= (parseInt(settings?.demo_voucher_limit || '10'));
   const isLicenseExpired = settings?.activation_status === 'activated' && settings?.license_expiry && new Date(settings.license_expiry) < new Date();
-  const isDemoExpired = (settings?.activation_status === 'demo' || isDemoUser) && getDemoSecondsLeft() <= 0;
+  const isDemoExpired = (settings?.activation_status === 'demo' || user?.email === 'demo') && getDemoSecondsLeft() <= 0;
   const isActivated = settings?.activation_status === 'activated';
   const showLogin = !isLoggedIn;
 
   const isSystemBlocked = (isDemoExpired || isDemoVoucherLimitReached || isLicenseExpired) && user?.role !== 'DESARROLLADOR';
 
   const menuItems = [
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, hidden: user?.role === 'DESARROLLADOR', disabled: isSystemBlocked },
     { id: 'pos', label: 'Punto de Venta', icon: ShoppingCart, hidden: user?.role === 'DESARROLLADOR', disabled: isSystemBlocked },
     { id: 'inventory', label: 'Inventario', icon: Package, hidden: (user?.role === 'ESTANDARD' && !isDemoUser) || user?.role === 'DESARROLLADOR', onClick: () => setInventoryCategoryFilter('all'), disabled: isSystemBlocked },
     { id: 'categories', label: 'Categorías', icon: Tags, hidden: (user?.role === 'ESTANDARD' && !isDemoUser) || user?.role === 'DESARROLLADOR', disabled: isSystemBlocked },
@@ -411,7 +461,6 @@ export default function App() {
 
   const renderSection = () => {
     switch (activeSection) {
-      case 'dashboard': return <Dashboard />;
       case 'pos': return <POS />;
       case 'inventory': return <Inventory initialCategoryFilter={inventoryCategoryFilter} />;
       case 'categories': return (
@@ -430,16 +479,15 @@ export default function App() {
       case 'settings': return <Configuration user={user} />;
       case 'users': return <UsersTab currentUser={user} />;
       case 'dev_mode': return <DeveloperMode user={user} />;
-      default: return <Dashboard />;
+      default: return <POS />;
     }
   };
 
 
   const handleStartDemo = async () => {
     try {
-      const res = await fetch('/api/activate-demo', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
+      const res = await apiFetch('/api/activate-demo', {
+        method: 'POST'
       });
       const data = await res.json();
       if (res.ok) {
@@ -524,23 +572,36 @@ export default function App() {
         </div>
 
         <nav className="flex-1 py-6 px-3 overflow-y-auto space-y-1">
-          {((settings?.activation_status === 'demo' || isDemoUser) || (isActivated && settings?.license_expiry && settings?.license_type !== 'infinite')) && isSidebarOpen && (
-            <div className="mx-2 mb-6 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-2xl border border-blue-100 dark:border-blue-900/30">
-              <div className="flex items-center gap-2 text-blue-600 dark:text-blue-400 mb-1">
-                <Clock size={16} />
-                <span className="text-[10px] font-black uppercase tracking-widest">
-                  {(settings?.activation_status === 'demo' || isDemoUser) ? 'Tiempo Demo' : 'Licencia'}
-                </span>
+          {((settings?.activation_status === 'demo' || isDemoUser) || (isActivated && settings?.license_expiry && settings?.license_type !== 'infinite')) && (
+            <div className={cn(
+              "mx-2 mb-6 p-4 rounded-2xl border transition-all duration-300",
+              settings?.theme_mode === 'dark' 
+                ? "bg-blue-900/20 border-blue-900/30" 
+                : "bg-blue-50 border-blue-100",
+              !isSidebarOpen && "px-2 py-3"
+            )}>
+              <div className={cn("flex flex-col gap-2", !isSidebarOpen && "items-center")}>
+                <div className={cn("flex items-center gap-2 text-blue-600 dark:text-blue-400 mb-1", !isSidebarOpen && "justify-center mb-0")}>
+                  <Clock size={isSidebarOpen ? 16 : 14} className={cn(!isSidebarOpen && "animate-pulse")} />
+                  {isSidebarOpen && (
+                    <span className="text-[10px] font-black uppercase tracking-widest">
+                      {(settings?.activation_status === 'demo' || isDemoUser) ? 'Tiempo Demo' : 'Licencia'}
+                    </span>
+                  )}
+                </div>
+                <div className={cn(
+                  "font-black transition-all",
+                  isSidebarOpen ? "text-xl" : "text-[8px] leading-tight text-center",
+                  (isDemoExpired || isLicenseExpired) ? "text-red-600" : "text-gray-900 dark:text-white"
+                )}>
+                  {formatTimeLeft((settings?.activation_status === 'demo' || isDemoUser) ? getDemoSecondsLeft() : getLicenseSecondsLeft())}
+                </div>
+                {isSidebarOpen && (
+                  <p className="text-[10px] text-gray-500 mt-1 font-medium">
+                    {(isDemoExpired || isLicenseExpired) ? 'Expirado' : 'Tiempo restante'}
+                  </p>
+                )}
               </div>
-              <div className={cn(
-                "text-xl font-black",
-                (isDemoExpired || isLicenseExpired) ? "text-red-600" : "text-gray-900 dark:text-white"
-              )}>
-                {formatTimeLeft((settings?.activation_status === 'demo' || isDemoUser) ? getDemoSecondsLeft() : getLicenseSecondsLeft())}
-              </div>
-              <p className="text-[10px] text-gray-500 mt-1 font-medium">
-                {(isDemoExpired || isLicenseExpired) ? 'Expirado' : 'Tiempo restante'}
-              </p>
             </div>
           )}
           {menuItems.map((item) => (
@@ -628,7 +689,8 @@ export default function App() {
               </div>
               <button 
                 onClick={() => {
-                  setIsDemoStarted(false);
+                  localStorage.removeItem('token');
+                  localStorage.removeItem('user');
                   setIsLoggedIn(false);
                   setUser(null);
                 }}
@@ -650,29 +712,120 @@ export default function App() {
         </header>
 
         {/* Content Area */}
-        <div className="flex-1 overflow-y-auto p-6 relative">
-          {isSystemBlocked && (
-            <div className="absolute inset-0 z-40 bg-white/80 dark:bg-gray-950/80 backdrop-blur-md flex items-center justify-center p-6">
+        <div className={cn("flex-1 overflow-y-auto p-6 relative", isSystemBlocked && "overflow-hidden")}>
+          <AnimatePresence>
+            {isSystemBlocked && (
               <motion.div 
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                className="max-w-md w-full bg-white dark:bg-gray-900 rounded-[2.5rem] shadow-2xl p-8 text-center space-y-6 border border-red-100 dark:border-red-900/30"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 z-[100] bg-white/60 dark:bg-gray-950/60 backdrop-blur-xl flex items-center justify-center p-6"
               >
-                <div className="w-20 h-20 bg-red-500 rounded-3xl mx-auto flex items-center justify-center text-white shadow-xl shadow-red-200/50">
-                  <ShieldAlert size={40} />
-                </div>
-                <div className="space-y-2">
-                  <h2 className="text-2xl font-black text-gray-900 dark:text-white">Sistema Bloqueado</h2>
-                  <p className="text-gray-500 dark:text-gray-400 font-medium">
-                    {isDemoExpired ? 'El periodo de prueba de 7 días hábiles ha expirado.' : 
-                     isDemoVoucherLimitReached ? 'Has alcanzado el límite de comprobantes en modo demo.' :
-                     settings?.license_type === 'demo_7' ? 'Tu periodo de prueba de 7 días ha expirado.' :
-                     'Tu suscripción ha expirado.'}
-                  </p>
-                </div>
+                <motion.div 
+                  initial={{ opacity: 0, scale: 0.9, y: 20 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  className="max-w-md w-full bg-white dark:bg-gray-900 rounded-[3rem] shadow-2xl p-10 text-center space-y-8 border border-red-100 dark:border-red-900/30 relative overflow-hidden"
+                >
+                  <div className="absolute top-0 left-0 w-full h-2 bg-red-500" />
+                  
+                  <div className="w-24 h-24 bg-red-500 rounded-[2rem] mx-auto flex items-center justify-center text-white shadow-2xl shadow-red-500/30">
+                    <ShieldAlert size={48} />
+                  </div>
+
+                  <div className="space-y-3">
+                    <h2 className="text-3xl font-black text-gray-900 dark:text-white tracking-tight">Sistema Bloqueado</h2>
+                    <div className="h-1 w-12 bg-red-500 mx-auto rounded-full" />
+                    <p className="text-gray-600 dark:text-gray-400 font-bold leading-relaxed px-4">
+                      {isDemoExpired ? 'El periodo de prueba de 7 días hábiles ha expirado.' : 
+                       isDemoVoucherLimitReached ? 'Has alcanzado el límite de comprobantes en modo demo.' :
+                       settings?.license_type === 'demo_7' ? 'Tu periodo de prueba de 7 días ha expirado.' :
+                       'Tu suscripción ha expirado.'}
+                    </p>
+                  </div>
+
+                  <div className="space-y-6 pt-4">
+                    <div className="flex items-center gap-4">
+                      <div className="h-px flex-1 bg-gray-100 dark:bg-gray-800" />
+                      <p className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em]">Contactar Soporte</p>
+                      <div className="h-px flex-1 bg-gray-100 dark:bg-gray-800" />
+                    </div>
+
+                    <div className="flex justify-center gap-4">
+                      {[
+                        { 
+                          href: "https://www.facebook.com/profile.php?id=61584020012816", 
+                          icon: Facebook, 
+                          color: "bg-[#1877F2]", 
+                          shadow: "shadow-blue-200/50",
+                          isFill: true
+                        },
+                        { 
+                          href: "https://www.instagram.com/possolutiongroup", 
+                          icon: Instagram, 
+                          color: "bg-gradient-to-tr from-[#F58529] via-[#DD2A7B] to-[#8134AF]", 
+                          shadow: "shadow-pink-200/50"
+                        },
+                        { 
+                          href: "https://www.tiktok.com/@possolutiongroup", 
+                          icon: null, 
+                          color: "bg-black", 
+                          shadow: "shadow-gray-400/50",
+                          customIcon: (
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                              <path d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 0 1-5.2 1.74 2.89 2.89 0 0 1 2.31-4.64 2.93 2.93 0 0 1 .88.13V9.4a6.84 6.84 0 0 0-1-.05A6.33 6.33 0 0 0 5 20.1a6.34 6.34 0 0 0 10.86-4.43v-7a8.16 8.16 0 0 0 4.77 1.52v-3.4a4.85 4.85 0 0 1-1.04-.1z"/>
+                            </svg>
+                          )
+                        },
+                        { 
+                          href: "https://wa.me/51921122456", 
+                          icon: null, 
+                          color: "bg-[#25D366]", 
+                          shadow: "shadow-green-200/50",
+                          customIcon: (
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                              <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
+                            </svg>
+                          )
+                        }
+                      ].map((social, idx) => (
+                        <motion.a
+                          key={idx}
+                          href={social.href}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          whileHover={{ scale: 1.1, rotate: 5 }}
+                          whileTap={{ scale: 0.9 }}
+                          className={cn(
+                            "w-12 h-12 text-white rounded-2xl flex items-center justify-center shadow-lg transition-all",
+                            social.color,
+                            social.shadow
+                          )}
+                        >
+                          {social.icon ? (
+                            <social.icon size={24} fill={social.isFill ? "currentColor" : "none"} />
+                          ) : social.customIcon}
+                        </motion.a>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="pt-6">
+                    <button 
+                      onClick={() => {
+                        localStorage.removeItem('token');
+                        localStorage.removeItem('user');
+                        setIsLoggedIn(false);
+                        setUser(null);
+                      }}
+                      className="text-sm font-black text-red-500 hover:text-red-600 transition-colors uppercase tracking-widest"
+                    >
+                      Cerrar Sesión
+                    </button>
+                  </div>
+                </motion.div>
               </motion.div>
-            </div>
-          )}
+            )}
+          </AnimatePresence>
           <motion.div
             key={activeSection}
             initial={{ opacity: 0, y: 10 }}

@@ -5,9 +5,20 @@ import path from "path";
 import fs from "fs";
 import { createServer } from "http";
 import { Server } from "socket.io";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
 
 const db = new Database("pos.db");
 db.pragma('foreign_keys = ON');
+
+const JWT_SECRET = process.env.JWT_SECRET || "psg-pos-secret-2026-secure-key";
+
+// Helper for Database operations to reduce redundancy
+const query = {
+  all: (sql: string, ...params: any[]) => db.prepare(sql).all(...params),
+  get: (sql: string, ...params: any[]) => db.prepare(sql).get(...params),
+  run: (sql: string, ...params: any[]) => db.prepare(sql).run(...params),
+};
 
 // Initialize Database Schema
 db.exec(`
@@ -152,44 +163,19 @@ db.exec(`
   );
 `);
 
-// Migration: Add serial_numbers to sale_items if it doesn't exist
-try {
-  db.exec("ALTER TABLE sale_items ADD COLUMN serial_numbers TEXT;");
-} catch (e) {
-  // Column already exists or other error
-}
-
-// Migration: Add warranty to sales if it doesn't exist
-try {
-  db.exec("ALTER TABLE sales ADD COLUMN warranty TEXT;");
-} catch (e) {
-  // Column already exists or other error
-}
-
-// Migration: Add subtotal to sales if it doesn't exist
-try {
-  db.exec("ALTER TABLE sales ADD COLUMN subtotal REAL;");
-} catch (e) {
-  // Column already exists or other error
-}
-
-// Migration: Add tax to sales if it doesn't exist
-try {
-  db.exec("ALTER TABLE sales ADD COLUMN tax REAL;");
-} catch (e) {
-  // Column already exists or other error
-}
-
-// Seed Initial Data
-try {
-  // Ensure 'demo' user exists
-  const demoExists = db.prepare("SELECT COUNT(*) as count FROM users WHERE email = 'demo'").get() as { count: number };
-  if (demoExists.count === 0) {
-    db.prepare("INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)").run('demo', 'demo', 'Usuario Demo', 'ESTANDARD');
+// Helper for migrations
+const safeExec = (sql: string) => {
+  try {
+    db.exec(sql);
+  } catch (e) {
+    // Ignore errors (like column already exists)
   }
-} catch (e) {
-  console.error("Error seeding initial data:", e);
-}
+};
+
+safeExec("ALTER TABLE sale_items ADD COLUMN serial_numbers TEXT;");
+safeExec("ALTER TABLE sales ADD COLUMN warranty TEXT;");
+safeExec("ALTER TABLE sales ADD COLUMN subtotal REAL;");
+safeExec("ALTER TABLE sales ADD COLUMN tax REAL;");
 
 // Migration: Add payment_method to sales if it doesn't exist
 try {
@@ -234,7 +220,8 @@ if (settingsCount.count === 0) {
   insertSetting.run("currency", "S/");
   insertSetting.run("ticket_message", "¡Gracias por su compra!");
   insertSetting.run("installation_date", "");
-  insertSetting.run("activation_status", "activated"); // demo, activated
+  insertSetting.run("activation_status", "demo"); // demo, activated
+  insertSetting.run("demo_start_date", new Date().toISOString());
   insertSetting.run("theme_mode", "light");
   insertSetting.run("primary_color", "#22c55e");
   insertSetting.run("user_name", "Admin Usuario");
@@ -245,7 +232,7 @@ if (settingsCount.count === 0) {
   insertSetting.run("ticket_font_bold", "0");
   insertSetting.run("ticket_font_italic", "0");
   insertSetting.run("demo_voucher_limit", "10");
-  insertSetting.run("demo_duration_hours", "0.016666666666666666");
+  insertSetting.run("demo_duration_hours", "168");
 } else {
   // Ensure new settings exist for existing installations
   const checkSetting = db.prepare("SELECT COUNT(*) as count FROM settings WHERE key = ?");
@@ -255,7 +242,10 @@ if (settingsCount.count === 0) {
     insertSetting.run("installation_date", "");
   }
   if ((checkSetting.get("activation_status") as any).count === 0) {
-    insertSetting.run("activation_status", "activated");
+    insertSetting.run("activation_status", "demo");
+  }
+  if ((checkSetting.get("demo_start_date") as any).count === 0) {
+    insertSetting.run("demo_start_date", new Date().toISOString());
   }
   if ((checkSetting.get("theme_mode") as any).count === 0) {
     insertSetting.run("theme_mode", "light");
@@ -291,7 +281,10 @@ if (settingsCount.count === 0) {
     insertSetting.run("demo_voucher_limit", "10");
   }
   if ((checkSetting.get("demo_duration_hours") as any).count === 0) {
-    insertSetting.run("demo_duration_hours", "0.016666666666666666");
+    insertSetting.run("demo_duration_hours", "168");
+  } else {
+    // Force reset to 7 days (168 hours)
+    db.prepare("UPDATE settings SET value = '168' WHERE key = 'demo_duration_hours'").run();
   }
   if ((checkSetting.get("license_expiry") as any).count === 0) {
     insertSetting.run("license_expiry", "");
@@ -333,11 +326,6 @@ if (settingsCount.count === 0) {
 
   // Force theme_mode to light
   db.prepare("UPDATE settings SET value = 'light' WHERE key = 'theme_mode'").run();
-  // Seed users
-  const userCount = db.prepare("SELECT COUNT(*) as count FROM users").get() as { count: number };
-  if (userCount.count === 0) {
-    db.prepare("INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)").run('admin@psg.la', '1475369', 'PSG Admin', 'DESARROLLADOR');
-  }
 }
 
 // Seed categories
@@ -468,6 +456,90 @@ const getSupId = (name: string) => sups.find(s => s.name === name)?.id;
   insertProduct.run("FH001", "Foco LED 9W Luz Blanca", getCatId("FH"), 4.50, 7.50, 40, 10, "Unidad", "Philips", getSupId("Sodimac"), "Foco ahorrador", "https://picsum.photos/seed/FH001/400/400");
   insertProduct.run("FH002", "Pilas Duracell AA x 4", getCatId("FH"), 12.50, 18.50, 20, 5, "Paquete", "Duracell", getSupId("Sodimac"), "Pilas alcalinas", "https://picsum.photos/seed/FH002/400/400");
 
+// Seeding initial users and migrations
+const seedUsers = () => {
+  // Ensure admin@psg.la exists and has correct password
+  const adminExists = query.get("SELECT * FROM users WHERE email = ?", 'admin@psg.la') as any;
+  const adminPassword = bcrypt.hashSync('1475369', 10);
+  if (!adminExists) {
+    query.run("INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)", 'admin@psg.la', adminPassword, 'PSG Admin', 'DESARROLLADOR');
+  } else {
+    // Force update to current required password for development/admin access if it was different
+    query.run("UPDATE users SET password = ?, role = 'DESARROLLADOR' WHERE email = ?", adminPassword, 'admin@psg.la');
+  }
+
+  // Ensure demo exists and has correct password
+  const demoExists = query.get("SELECT * FROM users WHERE email = ?", 'demo') as any;
+  const demoPassword = bcrypt.hashSync('demo', 10);
+  if (!demoExists) {
+    query.run("INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)", 'demo', demoPassword, 'Usuario Demo', 'ESTANDARD');
+  } else {
+    // Force update to 'demo' password
+    query.run("UPDATE users SET password = ? WHERE email = ?", demoPassword, 'demo');
+  }
+
+  // Force reset demo start date for testing
+  query.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", "demo_start_date", new Date().toISOString());
+  
+  // Migration: Hash existing plain-text passwords if any
+  const users = query.all("SELECT * FROM users") as any[];
+  for (const user of users) {
+    if (user.password && !user.password.startsWith('$2a$') && !user.password.startsWith('$2b$')) {
+      const hashed = bcrypt.hashSync(user.password, 10);
+      query.run("UPDATE users SET password = ? WHERE id = ?", hashed, user.id);
+    }
+  }
+};
+
+seedUsers();
+
+const verifyToken = (req: any, res: any, next: any) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) return res.status(401).json({ message: "No token provided" });
+
+  jwt.verify(token, JWT_SECRET, (err: any, user: any) => {
+    if (err) return res.status(401).json({ message: "Invalid token" });
+
+    // Check demo expiry
+    if (user.email === 'demo') {
+      const demoStart = query.get("SELECT value FROM settings WHERE key = 'demo_start_date'") as any;
+      const demoDuration = query.get("SELECT value FROM settings WHERE key = 'demo_duration_hours'") as any;
+      
+      if (demoStart) {
+        const startDate = new Date(demoStart.value);
+        const now = new Date();
+        const diffMs = now.getTime() - startDate.getTime();
+        const maxHours = parseFloat(demoDuration?.value || '168');
+        
+        if (diffMs > maxHours * 60 * 60 * 1000) {
+          return res.status(400).json({ message: `Tu período de prueba demo ha expirado (${maxHours} horas).` });
+        }
+      }
+    }
+
+    req.user = user;
+    next();
+  });
+};
+
+const checkRole = (roles: string[]) => {
+  return (req: any, res: any, next: any) => {
+    if (!req.user || !roles.includes(req.user.role)) {
+      return res.status(403).json({ message: "No tienes permisos para esta acción" });
+    }
+    next();
+  };
+};
+
+const isDemoBlocked = (req: any, res: any, next: any) => {
+  if (req.user?.email === 'demo') {
+    return res.status(400).json({ success: false, message: "El usuario demo no tiene permisos para esta acción en el servidor." });
+  }
+  next();
+};
+
 async function startServer() {
   const app = express();
   const httpServer = createServer(app);
@@ -478,6 +550,12 @@ async function startServer() {
 
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+  // Debug Logger
+  app.use((req, res, next) => {
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+    next();
+  });
 
   io.on('connection', (socket) => {
     console.log('A user connected');
@@ -504,49 +582,43 @@ async function startServer() {
   });
 
   // APIPeru Proxy Routes
-  app.get("/api/backup/all", (req, res) => {
+  app.get("/api/backup/all", verifyToken, checkRole(['ADMINISTRADOR', 'DESARROLLADOR']), (req, res) => {
     try {
-      const products = db.prepare('SELECT * FROM products').all();
-      const categories = db.prepare('SELECT * FROM categories').all();
-      const suppliers = db.prepare('SELECT * FROM suppliers').all();
-      const customers = db.prepare('SELECT * FROM customers').all();
-      const sales = db.prepare('SELECT * FROM sales').all();
-      const sale_items = db.prepare('SELECT * FROM sale_items').all();
-      const product_items = db.prepare('SELECT * FROM product_items').all();
-
-      res.json({
-        products,
-        categories,
-        suppliers,
-        customers,
-        sales,
-        sale_items,
-        product_items
-      });
+      const data = {
+        products: query.all('SELECT * FROM products'),
+        categories: query.all('SELECT * FROM categories'),
+        suppliers: query.all('SELECT * FROM suppliers'),
+        customers: query.all('SELECT * FROM customers'),
+        sales: query.all('SELECT * FROM sales'),
+        sale_items: query.all('SELECT * FROM sale_items'),
+        product_items: query.all('SELECT * FROM product_items'),
+        cash_flow: query.all('SELECT * FROM cash_flow'),
+        settings: query.all('SELECT * FROM settings')
+      };
+      res.json(data);
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
   });
 
-  app.post("/api/import", (req, res) => {
+  app.post("/api/import", verifyToken, checkRole(['ADMINISTRADOR', 'DESARROLLADOR']), isDemoBlocked, (req, res) => {
     const { categories, suppliers, customers, products, sales, sale_items, product_items } = req.body;
     
     try {
       const transaction = db.transaction(() => {
         // Clear existing data in correct order to respect foreign keys
-        db.prepare("DELETE FROM sale_items").run();
-        db.prepare("DELETE FROM sales").run();
-        db.prepare("DELETE FROM product_items").run();
-        db.prepare("DELETE FROM products").run();
-        db.prepare("DELETE FROM customers").run();
-        db.prepare("DELETE FROM suppliers").run();
-        db.prepare("DELETE FROM categories").run();
+        query.run("DELETE FROM sale_items");
+        query.run("DELETE FROM sales");
+        query.run("DELETE FROM product_items");
+        query.run("DELETE FROM products");
+        query.run("DELETE FROM customers");
+        query.run("DELETE FROM suppliers");
+        query.run("DELETE FROM categories");
 
         // Import Categories
         if (Array.isArray(categories)) {
-          const insert = db.prepare("INSERT INTO categories (id, name, prefix) VALUES (?, ?, ?)");
           for (const item of categories) {
-            insert.run(item.id, item.name, item.prefix);
+            query.run("INSERT INTO categories (id, name, prefix) VALUES (?, ?, ?)", item.id, item.name, item.prefix);
           }
         }
 
@@ -624,7 +696,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/settings", (req, res) => {
+  app.get("/api/settings", verifyToken, (req, res) => {
     try {
       const settings = db.prepare("SELECT * FROM settings").all();
       const settingsObj = settings.reduce((acc: any, curr: any) => {
@@ -643,14 +715,14 @@ async function startServer() {
     }
   });
 
-  app.get("/api/dashboard/stats", (req, res) => {
+  app.get("/api/dashboard/stats", verifyToken, (req, res) => {
     try {
       const today = new Date().toISOString().split('T')[0];
       
       // Basic stats
-      const dailySales = db.prepare("SELECT SUM(total) as total FROM sales WHERE date(created_at) = ?").get(today) as any;
-      const weeklySales = db.prepare("SELECT SUM(total) as total FROM sales WHERE created_at >= date('now', '-7 days')").get() as any;
-      const monthlySales = db.prepare("SELECT SUM(total) as total FROM sales WHERE created_at >= date('now', 'start of month')").get() as any;
+      const dailySales = db.prepare("SELECT ROUND(SUM(total), 2) as total FROM sales WHERE date(created_at) = ?").get(today) as any;
+      const weeklySales = db.prepare("SELECT ROUND(SUM(total), 2) as total FROM sales WHERE created_at >= date('now', '-7 days')").get() as any;
+      const monthlySales = db.prepare("SELECT ROUND(SUM(total), 2) as total FROM sales WHERE created_at >= date('now', 'start of month')").get() as any;
       const lowStock = db.prepare(`
         SELECT COUNT(*) as count 
         FROM (
@@ -720,11 +792,11 @@ async function startServer() {
         monthlySales,
         lowStock,
         totalProducts,
-        salesTrend,
-        salesByCategory,
+        salesTrend: salesTrend.map((t: any) => ({ ...t, sales: Math.round((t.sales + Number.EPSILON) * 100) / 100 })),
+        salesByCategory: salesByCategory.map((c: any) => ({ ...c, value: Math.round((c.value + Number.EPSILON) * 100) / 100 })),
         recentSales,
         lowStockProducts,
-        cashBalance: db.prepare("SELECT SUM(CASE WHEN type = 'income' THEN amount ELSE -amount END) as balance FROM cash_flow").get() as any
+        cashBalance: db.prepare("SELECT ROUND(SUM(CASE WHEN type = 'income' THEN amount ELSE -amount END), 2) as balance FROM cash_flow").get() as any
       };
       res.json(stats);
     } catch (error) {
@@ -734,7 +806,7 @@ async function startServer() {
   });
 
   // Cash Flow Routes
-  app.get("/api/cash-flow", (req, res) => {
+  app.get("/api/cash-flow", verifyToken, (req, res) => {
     try {
       const transactions = db.prepare("SELECT * FROM cash_flow ORDER BY created_at DESC").all();
       res.json(transactions);
@@ -743,7 +815,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/cash-flow", (req, res) => {
+  app.post("/api/cash-flow", verifyToken, isDemoBlocked, (req, res) => {
     const { type, amount, description } = req.body;
     try {
       db.prepare(`
@@ -757,7 +829,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/cash-flow/:id", (req, res) => {
+  app.delete("/api/cash-flow/:id", verifyToken, isDemoBlocked, (req, res) => {
     try {
       db.prepare("DELETE FROM cash_flow WHERE id = ?").run(req.params.id);
       io.emit('data_changed');
@@ -767,7 +839,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/reports/earnings", (req, res) => {
+  app.get("/api/reports/earnings", verifyToken, (req, res) => {
     try {
       const { range } = req.query;
       let dateFilter = "";
@@ -801,19 +873,19 @@ async function startServer() {
     }
   });
 
-  app.get("/api/categories", (req, res) => {
+  app.get("/api/categories", verifyToken, (req, res) => {
     const categories = db.prepare("SELECT * FROM categories").all();
     res.json(categories);
   });
 
-  app.post("/api/categories", (req, res) => {
+  app.post("/api/categories", verifyToken, isDemoBlocked, (req, res) => {
     const { name, prefix, description } = req.body;
     const info = db.prepare("INSERT INTO categories (name, prefix, description) VALUES (?, ?, ?)").run(name, prefix, description);
     io.emit('data_changed');
     res.json({ id: info.lastInsertRowid });
   });
 
-  app.get("/api/products", (req, res) => {
+  app.get("/api/products", verifyToken, (req, res) => {
     const products = db.prepare(`
       SELECT p.*, c.name as category_name,
       (SELECT COUNT(*) FROM product_items WHERE product_id = p.id AND status = 'available') as dynamic_stock
@@ -844,7 +916,7 @@ async function startServer() {
     res.json(items);
   });
 
-  app.post("/api/products", (req, res) => {
+  app.post("/api/products", verifyToken, isDemoBlocked, (req, res) => {
     const { name, category_id, purchase_price, sale_price, stock, min_stock, unit, brand, supplier_id, image, has_serials, serial_numbers } = req.body;
     
     // Generate code
@@ -905,7 +977,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/products/by-serial/:serial", (req, res) => {
+  app.get("/api/products/by-serial/:serial", verifyToken, (req, res) => {
     const item = db.prepare(`
       SELECT p.*, c.name as category_name,
       (SELECT COUNT(*) FROM product_items WHERE product_id = p.id AND status = 'available') as dynamic_stock
@@ -922,17 +994,27 @@ async function startServer() {
     res.json({ ...item, stock });
   });
 
-  app.get("/api/sales", (req, res) => {
-    const sales = db.prepare(`
+  app.get("/api/sales", verifyToken, (req, res) => {
+    const { start, end } = req.query;
+    let sql = `
       SELECT s.*, c.first_name, c.last_name 
       FROM sales s 
       LEFT JOIN customers c ON s.customer_id = c.id
-      ORDER BY s.created_at DESC
-    `).all();
+    `;
+    const params: any[] = [];
+    
+    if (start && end) {
+      sql += " WHERE s.created_at >= ? AND s.created_at <= ?";
+      params.push(`${start} 00:00:00`, `${end} 23:59:59`);
+    }
+    
+    sql += " ORDER BY s.created_at DESC";
+    
+    const sales = db.prepare(sql).all(...params);
     res.json(sales);
   });
 
-  app.get("/api/sales/:id", (req, res) => {
+  app.get("/api/sales/:id", verifyToken, (req, res) => {
     const sale = db.prepare(`
       SELECT s.*, c.first_name, c.last_name 
       FROM sales s 
@@ -952,7 +1034,7 @@ async function startServer() {
     res.json({ ...sale, items });
   });
 
-  app.get("/api/quotations", (req, res) => {
+  app.get("/api/quotations", verifyToken, (req, res) => {
     const quotations = db.prepare(`
       SELECT q.*, c.first_name, c.last_name 
       FROM quotations q 
@@ -962,7 +1044,7 @@ async function startServer() {
     res.json(quotations);
   });
 
-  app.get("/api/quotations/:id", (req, res) => {
+  app.get("/api/quotations/:id", verifyToken, (req, res) => {
     const quotation = db.prepare(`
       SELECT q.*, c.first_name, c.last_name 
       FROM quotations q 
@@ -982,7 +1064,7 @@ async function startServer() {
     res.json({ ...quotation, items });
   });
 
-  app.post("/api/quotations", (req, res) => {
+  app.post("/api/quotations", verifyToken, isDemoBlocked, (req, res) => {
     const { customer_id, items, total, subtotal, tax } = req.body;
     
     const transaction = db.transaction(() => {
@@ -996,7 +1078,7 @@ async function startServer() {
       for (const item of items) {
         db.prepare(`
           INSERT INTO quotation_items (quotation_id, product_id, quantity, price, subtotal)
-          VALUES (?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ROUND(?, 2))
         `).run(quotationId, item.id, item.quantity, item.price, item.quantity * item.price);
       }
       
@@ -1008,7 +1090,7 @@ async function startServer() {
     res.json({ id: quotationId });
   });
 
-  app.post("/api/sales", (req, res) => {
+  app.post("/api/sales", verifyToken, (req, res) => {
     const { customer_id, items, total, subtotal, tax, payment_method, warranty } = req.body;
     
     const transaction = db.transaction(() => {
@@ -1022,7 +1104,7 @@ async function startServer() {
       for (const item of items) {
         db.prepare(`
           INSERT INTO sale_items (sale_id, product_id, quantity, price, subtotal, serial_numbers, custom_name)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ROUND(?, 2), ?, ?)
         `).run(saleId, item.id, item.quantity, item.price, item.quantity * item.price, JSON.stringify(item.serial_numbers || []), item.name);
         
         if (item.id !== null && item.id !== undefined) {
@@ -1089,11 +1171,11 @@ async function startServer() {
     }
   });
 
-  app.post("/api/activate-demo", (req, res) => {
+  app.post("/api/activate-demo", verifyToken, checkRole(['DESARROLLADOR']), (req, res) => {
     try {
       const now = new Date().toISOString();
-      db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run("installation_date", now);
-      db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run("activation_status", "demo");
+      query.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", "installation_date", now);
+      query.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", "activation_status", "demo");
       io.emit('data_changed');
       res.json({ success: true, installation_date: now });
     } catch (error) {
@@ -1104,60 +1186,26 @@ async function startServer() {
   app.post("/api/auth/login", (req, res) => {
     const { email, password } = req.body;
     
-    // Hardcoded admin
-    if (email === 'admin@psg.la' && password === '1475369') {
-      return res.json({ 
-        success: true, 
-        user: { email: 'admin@psg.la', name: 'PSG Admin', role: 'DESARROLLADOR' } 
-      });
-    }
+    const user = query.get("SELECT * FROM users WHERE email = ?", email) as any;
+    if (user && bcrypt.compareSync(password, user.password)) {
+      // Special logic for demo login (reset/check dates)
+      if (user.email === 'demo') {
+        const settings = query.all("SELECT * FROM settings") as any[];
+        const settingsObj = settings.reduce((acc: any, curr: any) => {
+          acc[curr.key] = curr.value;
+          return acc;
+        }, {});
 
-    // Hardcoded demo account
-    if (email === 'demo' && password === 'demo') {
-      const settings = db.prepare("SELECT * FROM settings").all();
-      const settingsObj = settings.reduce((acc: any, curr: any) => {
-        acc[curr.key] = curr.value;
-        return acc;
-      }, {});
-
-      let changesMade = false;
-
-      // 1. Independent Demo Start Date
-      if (!settingsObj.demo_start_date) {
         const now = new Date().toISOString();
-        db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run("demo_start_date", now);
-        changesMade = true;
+        if (!settingsObj.demo_start_date) {
+          query.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", "demo_start_date", now);
+          io.emit('data_changed');
+        }
       }
 
-      // 2. Fallback Installation Date if missing
-      if (!settingsObj.installation_date) {
-        const now = new Date().toISOString();
-        db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run("installation_date", now);
-        changesMade = true;
-      }
-
-      // 3. Global activation status (only if not already set to something)
-      if (!settingsObj.activation_status) {
-        db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run("activation_status", "demo");
-        changesMade = true;
-      }
-
-      if (changesMade) {
-        io.emit('data_changed');
-      }
-      
-      return res.json({
-        success: true,
-        user: { email: 'demo', name: 'Usuario Demo', role: 'ESTANDARD' }
-      });
-    }
-
-    const user = db.prepare("SELECT * FROM users WHERE email = ? AND password = ?").get(email, password) as any;
-    if (user) {
-      res.json({ 
-        success: true, 
-        user: { email: user.email, name: user.name, role: user.role } 
-      });
+      const userData = { id: user.id, email: user.email, name: user.name, role: user.role };
+      const token = jwt.sign(userData, JWT_SECRET, { expiresIn: '24h' });
+      res.json({ success: true, user: userData, token });
     } else {
       res.status(401).json({ success: false, message: "Credenciales incorrectas" });
     }
@@ -1165,104 +1213,90 @@ async function startServer() {
 
   app.post("/api/auth/register", (req, res) => {
     const { email, password, name } = req.body;
+    const userCount = query.get("SELECT COUNT(*) as count FROM users") as { count: number };
     
-    const userCount = db.prepare("SELECT COUNT(*) as count FROM users").get() as { count: number };
-    
-    // Only allow 1 user to be created initially if not admin
     if (userCount.count >= 1) {
-      return res.status(400).json({ success: false, message: "Ya existe un usuario registrado. Solo el administrador puede crear más." });
+      return res.status(400).json({ success: false, message: "Ya existe un usuario registrado." });
     }
 
     try {
-      db.prepare("INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)").run(email, password, name, 'ESTANDARD');
+      const hashedPassword = bcrypt.hashSync(password, 10);
+      query.run("INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)", email, hashedPassword, name, 'ESTANDARD');
       res.json({ success: true });
     } catch (error) {
       res.status(500).json({ success: false, message: "Error al registrar usuario" });
     }
   });
 
-  app.get("/api/users", (req, res) => {
-    const users = db.prepare("SELECT id, email, name, role, created_at FROM users").all();
+  app.get("/api/auth/me", verifyToken, (req: any, res) => {
+    res.json({ success: true, user: req.user });
+  });
+
+  app.get("/api/users", verifyToken, checkRole(['DESARROLLADOR', 'ADMINISTRADOR', 'ESTANDARD']), (req: any, res) => {
+    // Only 'demo' or admins can see the full list based on UI requirements
+    if (req.user.role === 'ESTANDARD' && req.user.email !== 'demo') {
+        return res.status(403).json({ message: "No tienes permisos" });
+    }
+    const users = query.all("SELECT id, email, name, role, created_at FROM users");
     res.json(users);
   });
 
-  app.post("/api/users", (req, res) => {
+  app.post("/api/users", verifyToken, checkRole(['DESARROLLADOR', 'ADMINISTRADOR']), isDemoBlocked, (req, res) => {
     const { email, password, name, role } = req.body;
+    const currentCount = query.get("SELECT COUNT(*) as count FROM users") as { count: number };
+    const unlimited_users = query.get("SELECT value FROM settings WHERE key = 'unlimited_users'") as { value: string };
     
-    const currentCount = db.prepare("SELECT COUNT(*) as count FROM users").get() as { count: number };
-    const unlimitedUsers = db.prepare("SELECT value FROM settings WHERE key = 'unlimited_users'").get() as { value: string };
-    
-    if (unlimitedUsers?.value !== '1' && currentCount.count >= 5) {
-      return res.status(400).json({ success: false, message: "Límite de 5 usuarios alcanzado. Contacte al desarrollador para ampliar el límite." });
+    if (unlimited_users?.value !== '1' && currentCount.count >= 5) {
+      return res.status(400).json({ success: false, message: "Límite de 5 usuarios alcanzado." });
     }
-
-    if (role === 'DESARROLLADOR') {
-      return res.status(400).json({ success: false, message: "No se pueden crear más usuarios Desarrollador" });
-    }
+    if (role === 'DESARROLLADOR') return res.status(400).json({ success: false, message: "No permitido" });
 
     try {
-      db.prepare("INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)").run(email, password, name, role || 'ESTANDARD');
+      const hashedPassword = bcrypt.hashSync(password, 10);
+      query.run("INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)", email, hashedPassword, name, role || 'ESTANDARD');
       res.json({ success: true });
     } catch (error) {
       res.status(500).json({ success: false, message: "Error al crear usuario" });
     }
   });
 
-  app.put("/api/users/:id", (req, res) => {
-    const { id } = req.params;
+  app.put("/api/users/:id", verifyToken, checkRole(['DESARROLLADOR', 'ADMINISTRADOR']), isDemoBlocked, (req, res) => {
     const { email, password, name, role } = req.body;
-
-    const targetUser = db.prepare("SELECT email FROM users WHERE id = ?").get(id) as any;
-    if (targetUser && targetUser.email === 'admin@psg.la') {
-      return res.status(400).json({ success: false, message: "No se puede modificar el usuario Desarrollador principal" });
-    }
-
-    if (role === 'DESARROLLADOR') {
-      return res.status(400).json({ success: false, message: "No se puede asignar el rol Desarrollador" });
-    }
-
     try {
       if (password) {
-        db.prepare("UPDATE users SET email = ?, password = ?, name = ?, role = ? WHERE id = ?").run(email, password, name, role, id);
+        const hashedPassword = bcrypt.hashSync(password, 10);
+        query.run("UPDATE users SET email = ?, password = ?, name = ?, role = ? WHERE id = ?", email, hashedPassword, name, role, req.params.id);
       } else {
-        db.prepare("UPDATE users SET email = ?, name = ?, role = ? WHERE id = ?").run(email, name, role, id);
+        query.run("UPDATE users SET email = ?, name = ?, role = ? WHERE id = ?", email, name, role, req.params.id);
       }
       res.json({ success: true });
     } catch (error) {
-      res.status(500).json({ success: false, message: "Error al actualizar usuario" });
+      res.status(500).json({ success: false, message: "Error al actualizar" });
     }
   });
 
-  app.delete("/api/users/:id", (req, res) => {
-    const { id } = req.params;
-
-    const targetUser = db.prepare("SELECT email FROM users WHERE id = ?").get(id) as any;
-    if (targetUser && targetUser.email === 'admin@psg.la') {
-      return res.status(400).json({ success: false, message: "No se puede eliminar el usuario Desarrollador principal" });
-    }
-
+  app.delete("/api/users/:id", verifyToken, checkRole(['DESARROLLADOR', 'ADMINISTRADOR']), isDemoBlocked, (req, res) => {
     try {
-      db.prepare("DELETE FROM users WHERE id = ?").run(id);
+      query.run("DELETE FROM users WHERE id = ?", req.params.id);
       res.json({ success: true });
     } catch (error) {
-      res.status(500).json({ success: false, message: "Error al eliminar usuario" });
+      res.status(500).json({ success: false, message: "Error al eliminar" });
     }
   });
 
-  app.post("/api/activate", (req, res) => {
+  app.post("/api/activate", verifyToken, checkRole(['DESARROLLADOR', 'ADMINISTRADOR']), (req, res) => {
     const { code } = req.body;
     // Hardcoded activation code for the user: NEXUS-POS-2024-PRO
     if (code === "NEXUS-POS-2024-PRO") {
-      db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run("activation_status", "activated");
+      query.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", "activation_status", "activated");
       res.json({ success: true, message: "Sistema activado correctamente" });
     } else {
       res.status(400).json({ success: false, message: "Código de activación inválido" });
     }
   });
 
-  app.post("/api/license/activate", (req, res) => {
+  app.post("/api/license/activate", verifyToken, checkRole(['DESARROLLADOR']), (req, res) => {
     const { type, durationMonths } = req.body;
-    // durationMonths: 3, 6, 12, 0 (infinite), -1 (7 days demo)
     
     let expiryDate = "";
     let licenseType = "";
@@ -1283,12 +1317,12 @@ async function startServer() {
     }
 
     const transaction = db.transaction(() => {
-      db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run("activation_status", "activated");
-      db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run("license_expiry", expiryDate);
-      db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run("license_type", licenseType);
+      query.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", "activation_status", "activated");
+      query.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", "license_expiry", expiryDate);
+      query.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", "license_type", licenseType);
       
       if (type === 'infinite') {
-        db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run("unlimited_users", "1");
+        query.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", "unlimited_users", "1");
       }
     });
     
@@ -1296,15 +1330,15 @@ async function startServer() {
     res.json({ success: true, expiryDate, licenseType });
   });
 
-  app.post("/api/license/reset", (req, res) => {
+  app.post("/api/license/reset", verifyToken, checkRole(['DESARROLLADOR']), (req, res) => {
     try {
       const transaction = db.transaction(() => {
-        db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run("activation_status", "demo");
-        db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run("license_type", "demo");
-        db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run("license_expiry", "");
-        db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run("installation_date", "");
-        db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run("demo_start_date", "");
-        db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run("unlimited_users", "0");
+        query.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", "activation_status", "demo");
+        query.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", "license_type", "demo");
+        query.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", "license_expiry", "");
+        query.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", "installation_date", "");
+        query.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", "demo_start_date", "");
+        query.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", "unlimited_users", "0");
       });
       transaction();
       io.emit('data_changed');
@@ -1314,9 +1348,9 @@ async function startServer() {
     }
   });
 
-  app.post("/api/demo/reset", (req, res) => {
+  app.post("/api/demo/reset", verifyToken, checkRole(['DESARROLLADOR']), (req, res) => {
     try {
-      db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run("demo_start_date", "");
+      query.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", "demo_start_date", "");
       io.emit('data_changed');
       res.json({ success: true });
     } catch (error) {
@@ -1324,31 +1358,28 @@ async function startServer() {
     }
   });
 
-  app.post("/api/settings", (req, res) => {
+  app.post("/api/settings", verifyToken, checkRole(['DESARROLLADOR', 'ADMINISTRADOR']), (req, res) => {
     const updates = req.body;
-    const updateStmt = db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
-    const transaction = db.transaction(() => {
-      const currentLicense = db.prepare("SELECT value FROM settings WHERE key = 'license_type'").get() as { value: string };
-      const isInfinite = currentLicense?.value === 'infinite';
+    try {
+      const transaction = db.transaction(() => {
+        const currentLicense = query.get("SELECT value FROM settings WHERE key = 'license_type'") as { value: string };
+        const isInfinite = currentLicense?.value === 'infinite';
 
-      for (const [key, value] of Object.entries(updates)) {
-        // Protect critical settings from being modified via regular settings update
-        if (key === 'installation_date' || key === 'activation_status') {
-          continue;
+        for (const [key, value] of Object.entries(updates)) {
+          if (key === 'installation_date' || key === 'activation_status') continue;
+          if (key === 'unlimited_users' && isInfinite) continue;
+          query.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", key, String(value));
         }
-        // Protect unlimited_users if license is infinite
-        if (key === 'unlimited_users' && isInfinite) {
-          continue;
-        }
-        updateStmt.run(key, String(value));
-      }
-    });
-    transaction();
-    io.emit('data_changed');
-    res.json({ success: true });
+      });
+      transaction();
+      io.emit('data_changed');
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: "Internal Server Error" });
+    }
   });
 
-  app.put("/api/products/:id", (req, res) => {
+  app.put("/api/products/:id", verifyToken, isDemoBlocked, (req, res) => {
     const { id } = req.params;
     const { name, category_id, purchase_price, sale_price, stock, min_stock, unit, brand, supplier_id, image, has_serials, serial_numbers } = req.body;
     
@@ -1424,7 +1455,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/products/:id", (req, res) => {
+  app.delete("/api/products/:id", verifyToken, isDemoBlocked, (req, res) => {
     try {
       db.prepare("DELETE FROM products WHERE id = ?").run(req.params.id);
       io.emit('data_changed');
@@ -1442,12 +1473,12 @@ async function startServer() {
     }
   });
 
-  app.get("/api/suppliers", (req, res) => {
+  app.get("/api/suppliers", verifyToken, (req, res) => {
     const suppliers = db.prepare("SELECT * FROM suppliers").all();
     res.json(suppliers);
   });
 
-  app.post("/api/suppliers", (req, res) => {
+  app.post("/api/suppliers", verifyToken, isDemoBlocked, (req, res) => {
     const { name, company, tax_id, phone, email, address, city, country, contact_person, notes } = req.body;
     const info = db.prepare(`
       INSERT INTO suppliers (name, company, tax_id, phone, email, address, city, country, contact_person, notes)
@@ -1456,7 +1487,7 @@ async function startServer() {
     res.json({ id: info.lastInsertRowid });
   });
 
-  app.put("/api/suppliers/:id", (req, res) => {
+  app.put("/api/suppliers/:id", verifyToken, isDemoBlocked, (req, res) => {
     const { id } = req.params;
     const { name, company, tax_id, phone, email, address, city, country, contact_person, notes } = req.body;
     db.prepare(`
@@ -1467,12 +1498,12 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  app.get("/api/customers", (req, res) => {
+  app.get("/api/customers", verifyToken, (req, res) => {
     const customers = db.prepare("SELECT * FROM customers").all();
     res.json(customers);
   });
 
-  app.post("/api/customers", (req, res) => {
+  app.post("/api/customers", verifyToken, isDemoBlocked, (req, res) => {
     const { first_name, last_name, dni, phone, email, address } = req.body;
     try {
       const info = db.prepare(`
@@ -1490,7 +1521,7 @@ async function startServer() {
     }
   });
 
-  app.put("/api/customers/:id", (req, res) => {
+  app.put("/api/customers/:id", verifyToken, isDemoBlocked, (req, res) => {
     const { id } = req.params;
     const { first_name, last_name, dni, phone, email, address } = req.body;
     try {
@@ -1510,7 +1541,7 @@ async function startServer() {
     }
   });
 
-  app.put("/api/categories/:id", (req, res) => {
+  app.put("/api/categories/:id", verifyToken, isDemoBlocked, (req, res) => {
     const { id } = req.params;
     const { name, prefix, description } = req.body;
     db.prepare(`
@@ -1520,7 +1551,7 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  app.delete("/api/categories/:id", (req, res) => {
+  app.delete("/api/categories/:id", verifyToken, isDemoBlocked, (req, res) => {
     const { id } = req.params;
     const categoryId = parseInt(id);
 
@@ -1548,7 +1579,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/suppliers/:id", (req, res) => {
+  app.delete("/api/suppliers/:id", verifyToken, isDemoBlocked, (req, res) => {
     try {
       db.prepare("DELETE FROM suppliers WHERE id = ?").run(req.params.id);
       io.emit('data_changed');
@@ -1566,7 +1597,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/customers/:id", (req, res) => {
+  app.delete("/api/customers/:id", verifyToken, isDemoBlocked, (req, res) => {
     try {
       db.prepare("DELETE FROM customers WHERE id = ?").run(req.params.id);
       io.emit('data_changed');
@@ -1587,6 +1618,15 @@ async function startServer() {
   // Fallback for non-existent API routes to prevent HTML response
   app.all("/api/*", (req, res) => {
     res.status(404).json({ error: `API route ${req.method} ${req.path} not found` });
+  });
+
+  // Global Error Handler
+  app.use((err: any, req: any, res: any, next: any) => {
+    console.error('SERVER ERROR:', err);
+    res.status(err.status || 500).json({ 
+      success: false,
+      error: err.message || "Internal Server Error" 
+    });
   });
 
   // Vite middleware for development

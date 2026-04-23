@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiFetch } from '../lib/api';
 import { 
   User, 
   Phone, 
@@ -35,9 +36,9 @@ export default function Customers() {
   });
 
   const fetchCustomers = () => {
-    fetch('/api/customers')
+    apiFetch('/api/customers')
       .then(res => res.json())
-      .then(setCustomers);
+      .then(data => setCustomers(Array.isArray(data) ? data : []));
   };
 
   useEffect(() => {
@@ -87,7 +88,7 @@ export default function Customers() {
           let errors: string[] = [];
 
           for (const id of selectedIds) {
-            const res = await fetch(`/api/customers/${id}`, { method: 'DELETE' });
+            const res = await apiFetch(`/api/customers/${id}`, { method: 'DELETE' });
             const data = await res.json();
             if (res.ok && data.success) {
               successCount++;
@@ -116,9 +117,8 @@ export default function Customers() {
     const url = editingCustomer ? `/api/customers/${editingCustomer.id}` : '/api/customers';
     const method = editingCustomer ? 'PUT' : 'POST';
 
-    const res = await fetch(url, {
+    const res = await apiFetch(url, {
       method,
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(formData)
     });
 
@@ -272,7 +272,7 @@ export default function Customers() {
                             '¿Estás seguro de que deseas eliminar este cliente? Esta acción no se puede deshacer.',
                             async () => {
                               try {
-                                const res = await fetch(`/api/customers/${customer.id}`, { method: 'DELETE' });
+                                const res = await apiFetch(`/api/customers/${customer.id}`, { method: 'DELETE' });
                                 const data = await res.json();
                                 if (res.ok && data.success) {
                                   fetchCustomers();

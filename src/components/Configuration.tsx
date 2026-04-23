@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { apiFetch } from '../lib/api';
 import { 
   Store, 
   Ticket, 
@@ -92,9 +93,8 @@ export default function Configuration({ user }: { user: any }) {
         }
 
         setIsSaving(true);
-        const res = await fetch('/api/import', {
+        const res = await apiFetch('/api/import', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(data)
         });
 
@@ -119,9 +119,8 @@ export default function Configuration({ user }: { user: any }) {
   const saveSettings = async (currentSettings: AppSettings) => {
     setIsSaving(true);
     try {
-      const res = await fetch('/api/settings', {
+      const res = await apiFetch('/api/settings', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(currentSettings)
       });
       if (res.ok) {
@@ -155,7 +154,7 @@ export default function Configuration({ user }: { user: any }) {
   };
 
   const fetchSettings = () => {
-    fetch('/api/settings')
+    apiFetch('/api/settings')
       .then(res => res.json())
       .then(data => {
         setSettings(data);
@@ -178,7 +177,7 @@ export default function Configuration({ user }: { user: any }) {
 
   const exportBackup = async () => {
     try {
-      const res = await fetch('/api/backup/all');
+      const res = await apiFetch('/api/backup/all');
       const data = await res.json();
 
       const workbook = XLSX.utils.book_new();

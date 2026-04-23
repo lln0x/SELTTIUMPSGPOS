@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { apiFetch } from '../lib/api';
 import { 
   Search, 
   Plus, 
@@ -17,7 +18,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Product, Category, Supplier } from '../types';
-import { formatCurrency, cn } from '../lib/utils';
+import { formatCurrency, cn, roundTo2Decimals } from '../lib/utils';
 import * as XLSX from 'xlsx';
 import { useDataSync } from '../hooks/useDataSync';
 import { useConfirm } from '../hooks/useConfirm';
@@ -68,13 +69,13 @@ export default function Inventory({ initialCategoryFilter = 'all' }: InventoryPr
 
   const fetchData = useCallback(() => {
     Promise.all([
-      fetch('/api/products').then(res => res.json()),
-      fetch('/api/categories').then(res => res.json()),
-      fetch('/api/suppliers').then(res => res.json())
+      apiFetch('/api/products').then(res => res.json()),
+      apiFetch('/api/categories').then(res => res.json()),
+      apiFetch('/api/suppliers').then(res => res.json())
     ]).then(([p, c, s]) => {
-      setProducts(p);
-      setCategories(c);
-      setSuppliers(s);
+      setProducts(Array.isArray(p) ? p : []);
+      setCategories(Array.isArray(c) ? c : []);
+      setSuppliers(Array.isArray(s) ? s : []);
     });
   }, []);
 
@@ -100,7 +101,7 @@ export default function Inventory({ initialCategoryFilter = 'all' }: InventoryPr
       '¿Estás seguro de que deseas eliminar este producto? Esta acción no se puede deshacer.',
       async () => {
         try {
-          const res = await fetch(`/api/products/${id}`, { method: 'DELETE' });
+          const res = await apiFetch(`/api/products/${id}`, { method: 'DELETE' });
           const data = await res.json();
           if (res.ok && data.success) {
             setSelectedIds(prev => prev.filter(selectedId => selectedId !== id));
@@ -128,7 +129,7 @@ export default function Inventory({ initialCategoryFilter = 'all' }: InventoryPr
           let errors: string[] = [];
 
           for (const id of selectedIds) {
-            const res = await fetch(`/api/products/${id}`, { method: 'DELETE' });
+            const res = await apiFetch(`/api/products/${id}`, { method: 'DELETE' });
             const data = await res.json();
             if (res.ok && data.success) {
               successCount++;
@@ -178,15 +179,15 @@ export default function Inventory({ initialCategoryFilter = 'all' }: InventoryPr
     }
   };
 
-  const filteredCategories = categories.filter(c => 
+  const filteredCategories = (categories || []).filter(c => 
     c.name.toLowerCase().includes(categorySearch.toLowerCase())
   );
 
-  const filteredSuppliers = suppliers.filter(s => 
+  const filteredSuppliers = (suppliers || []).filter(s => 
     s.name.toLowerCase().includes(supplierSearch.toLowerCase())
   );
 
-  const filteredProducts = products.filter(p => {
+  const filteredProducts = (products || []).filter(p => {
     const matchesSearch = p.name.toLowerCase().includes(search.toLowerCase()) || p.code.toLowerCase().includes(search.toLowerCase());
     const matchesCategory = filterCategory === 'all' || p.category_id === filterCategory;
     const matchesStock = filterStock === 'all' || p.stock <= p.min_stock;
@@ -198,15 +199,14 @@ export default function Inventory({ initialCategoryFilter = 'all' }: InventoryPr
     const url = editingProduct ? `/api/products/${editingProduct.id}` : '/api/products';
     const method = editingProduct ? 'PUT' : 'POST';
 
-    const res = await fetch(url, {
+    const res = await apiFetch(url, {
       method,
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         ...formData,
         category_id: parseInt(formData.category_id),
         supplier_id: formData.supplier_id ? parseInt(formData.supplier_id) : null,
-        purchase_price: parseFloat(formData.purchase_price),
-        sale_price: parseFloat(formData.sale_price),
+        purchase_price: roundTo2Decimals(parseFloat(formData.purchase_price) || 0),
+        sale_price: roundTo2Decimals(parseFloat(formData.sale_price) || 0),
         stock: parseInt(formData.stock),
         min_stock: parseInt(formData.min_stock),
         serial_numbers: formData.has_serials ? formData.serial_numbers : [],
@@ -240,9 +240,10 @@ export default function Inventory({ initialCategoryFilter = 'all' }: InventoryPr
       let serials: string[] = [];
       if (product.has_serials) {
         try {
-          const res = await fetch(`/api/products/${product.id}/items`);
+          const res = await apiFetch(`/api/products/${product.id}/items`);
           const items = await res.json();
-          serials = items.map((i: any) => i.serial_number);
+          const itemsArray = Array.isArray(items) ? items : [];
+          serials = itemsArray.map((i: any) => i.serial_number);
         } catch (e) {
           console.error('Error fetching items:', e);
         }

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiFetch } from '../lib/api';
 import { 
   Search, 
   Eye, 
@@ -27,13 +28,13 @@ export default function SalesRecords() {
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
 
   const fetchSales = () => {
-    fetch('/api/sales')
+    apiFetch('/api/sales')
       .then(res => res.json())
-      .then(setSales);
+      .then(data => setSales(Array.isArray(data) ? data : []));
   };
 
   const fetchSettings = () => {
-    fetch('/api/settings')
+    apiFetch('/api/settings')
       .then(res => res.json())
       .then(setSettings);
   };
@@ -58,7 +59,7 @@ export default function SalesRecords() {
 
   const viewSaleDetails = async (id: number) => {
     try {
-      const res = await fetch(`/api/sales/${id}`);
+      const res = await apiFetch(`/api/sales/${id}`);
       const data = await res.json();
       setSelectedSale(data);
       setIsModalOpen(true);
@@ -516,7 +517,7 @@ export default function SalesRecords() {
     doc.save(`Venta_${String(selectedSale.id).padStart(6, '0')}.pdf`);
   };
 
-  const filteredSales = sales.filter(s => {
+  const filteredSales = (sales || []).filter(s => {
     const saleId = `#V${String(s.id).padStart(6, '0')}`;
     const customerName = `${s.customer_id ? `${(s as any).first_name} ${(s as any).last_name}` : 'Público General'}`.toLowerCase();
     return saleId.includes(search) || customerName.includes(search.toLowerCase());

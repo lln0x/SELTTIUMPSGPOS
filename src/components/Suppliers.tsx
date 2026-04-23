@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiFetch } from '../lib/api';
 import { 
   Building2, 
   Phone, 
@@ -38,9 +39,9 @@ export default function Suppliers() {
   });
 
   const fetchSuppliers = () => {
-    fetch('/api/suppliers')
+    apiFetch('/api/suppliers')
       .then(res => res.json())
-      .then(setSuppliers);
+      .then(data => setSuppliers(Array.isArray(data) ? data : []));
   };
 
   useEffect(() => {
@@ -76,7 +77,7 @@ export default function Suppliers() {
           let errors: string[] = [];
 
           for (const id of selectedIds) {
-            const res = await fetch(`/api/suppliers/${id}`, { method: 'DELETE' });
+            const res = await apiFetch(`/api/suppliers/${id}`, { method: 'DELETE' });
             const data = await res.json();
             if (res.ok && data.success) {
               successCount++;
@@ -119,9 +120,8 @@ export default function Suppliers() {
     const url = editingSupplier ? `/api/suppliers/${editingSupplier.id}` : '/api/suppliers';
     const method = editingSupplier ? 'PUT' : 'POST';
 
-    const res = await fetch(url, {
+    const res = await apiFetch(url, {
       method,
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(formData)
     });
 
@@ -239,7 +239,7 @@ export default function Suppliers() {
                         '¿Estás seguro de que deseas eliminar este proveedor? Esta acción no se puede deshacer.',
                         async () => {
                           try {
-                            const res = await fetch(`/api/suppliers/${sup.id}`, { method: 'DELETE' });
+                            const res = await apiFetch(`/api/suppliers/${sup.id}`, { method: 'DELETE' });
                             const data = await res.json();
                             if (res.ok && data.success) {
                               fetchSuppliers();

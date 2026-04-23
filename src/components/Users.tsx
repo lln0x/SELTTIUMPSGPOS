@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiFetch } from '../lib/api';
 import { Users as UsersIcon, UserPlus, Mail, Shield, Calendar, Trash2, Edit2, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useConfirm } from '../hooks/useConfirm';
@@ -35,13 +36,13 @@ export default function Users({ currentUser }: { currentUser: any }) {
     if (!isAdmin) return;
     try {
       const [usersRes, settingsRes] = await Promise.all([
-        fetch('/api/users'),
-        fetch('/api/settings')
+        apiFetch('/api/users'),
+        apiFetch('/api/settings')
       ]);
       const usersData = await usersRes.json();
       const settingsData = await settingsRes.json();
       
-      setUsers(usersData);
+      setUsers(Array.isArray(usersData) ? usersData : []);
       setUnlimitedUsers(settingsData.unlimited_users === '1');
       setIsLoading(false);
     } catch (err) {
@@ -74,9 +75,8 @@ export default function Users({ currentUser }: { currentUser: any }) {
       const url = editingUser ? `/api/users/${editingUser.id}` : '/api/users';
       const method = editingUser ? 'PUT' : 'POST';
       
-      const res = await fetch(url, {
+      const res = await apiFetch(url, {
         method,
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(formData)
       });
       const data = await res.json();
@@ -105,7 +105,7 @@ export default function Users({ currentUser }: { currentUser: any }) {
       '¿Estás seguro de que deseas eliminar este usuario? Esta acción no se puede deshacer.',
       async () => {
         try {
-          const res = await fetch(`/api/users/${id}`, { method: 'DELETE' });
+          const res = await apiFetch(`/api/users/${id}`, { method: 'DELETE' });
           const data = await res.json();
           if (data.success) {
             setSelectedIds(prev => prev.filter(selectedId => selectedId !== id));
@@ -152,7 +152,7 @@ export default function Users({ currentUser }: { currentUser: any }) {
           let errors: string[] = [];
 
           for (const id of selectedIds) {
-            const res = await fetch(`/api/users/${id}`, { method: 'DELETE' });
+            const res = await apiFetch(`/api/users/${id}`, { method: 'DELETE' });
             const data = await res.json();
             if (data.success) {
               successCount++;

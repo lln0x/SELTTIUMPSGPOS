@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiFetch } from '../lib/api';
 import { 
   ShieldCheck, 
   Clock, 
@@ -23,7 +24,7 @@ export default function DeveloperMode({ user }: { user: any }) {
 
   const fetchSettings = async () => {
     try {
-      const res = await fetch('/api/settings');
+      const res = await apiFetch('/api/settings');
       const data = await res.json();
       setSettings(data);
     } catch (error) {
@@ -43,9 +44,8 @@ export default function DeveloperMode({ user }: { user: any }) {
     setIsActivating(true);
     setError('');
     try {
-      const res = await fetch('/api/license/activate', {
+      const res = await apiFetch('/api/license/activate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ type, durationMonths })
       });
       const data = await res.json();
@@ -67,9 +67,8 @@ export default function DeveloperMode({ user }: { user: any }) {
     if (!settings) return;
     const newValue = settings.unlimited_users === '1' ? '0' : '1';
     try {
-      const res = await fetch('/api/settings', {
+      const res = await apiFetch('/api/settings', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...settings, unlimited_users: newValue })
       });
       if (res.ok) {
@@ -86,9 +85,8 @@ export default function DeveloperMode({ user }: { user: any }) {
     setIsActivating(true);
     setError('');
     try {
-      const res = await fetch('/api/license/reset', { 
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
+      const res = await apiFetch('/api/license/reset', { 
+        method: 'POST'
       });
       const data = await res.json();
       if (data.success) {
@@ -109,9 +107,8 @@ export default function DeveloperMode({ user }: { user: any }) {
     setIsActivating(true);
     setError('');
     try {
-      const res = await fetch('/api/demo/reset', { 
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
+      const res = await apiFetch('/api/demo/reset', { 
+        method: 'POST'
       });
       const data = await res.json();
       if (data.success) {

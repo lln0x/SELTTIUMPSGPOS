@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiFetch } from '../lib/api';
 import { Plus, Edit, Trash2, X, Tags, Search } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Category } from '../types';
@@ -24,9 +25,9 @@ export default function Categories({ onViewProducts }: CategoriesProps) {
   });
 
   const fetchCategories = () => {
-    fetch('/api/categories')
+    apiFetch('/api/categories')
       .then(res => res.json())
-      .then(setCategories);
+      .then(data => setCategories(Array.isArray(data) ? data : []));
   };
 
   useEffect(() => {
@@ -57,7 +58,7 @@ export default function Categories({ onViewProducts }: CategoriesProps) {
           let errors: string[] = [];
 
           for (const id of selectedIds) {
-            const res = await fetch(`/api/categories/${id}`, { method: 'DELETE' });
+            const res = await apiFetch(`/api/categories/${id}`, { method: 'DELETE' });
             const data = await res.json();
             if (res.ok && data.success) {
               successCount++;
@@ -88,7 +89,7 @@ export default function Categories({ onViewProducts }: CategoriesProps) {
     );
   };
 
-  const filteredCategories = categories.filter(c => c.name.toLowerCase().includes(search.toLowerCase()));
+  const filteredCategories = (categories || []).filter(c => c.name.toLowerCase().includes(search.toLowerCase()));
 
   const toggleSelectAll = () => {
     const selectable = filteredCategories.filter(c => c.id !== 0);
@@ -104,9 +105,8 @@ export default function Categories({ onViewProducts }: CategoriesProps) {
     const url = editingCategory ? `/api/categories/${editingCategory.id}` : '/api/categories';
     const method = editingCategory ? 'PUT' : 'POST';
 
-    const res = await fetch(url, {
+    const res = await apiFetch(url, {
       method,
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(formData)
     });
 
@@ -221,7 +221,7 @@ export default function Categories({ onViewProducts }: CategoriesProps) {
                       '¿Estás seguro de que deseas eliminar esta categoría? Esta acción no se puede deshacer.',
                       async () => {
                         try {
-                          const res = await fetch(`/api/categories/${cat.id}`, { method: 'DELETE' });
+                          const res = await apiFetch(`/api/categories/${cat.id}`, { method: 'DELETE' });
                           const data = await res.json();
                           if (res.ok && data.success) {
                             fetchCategories();

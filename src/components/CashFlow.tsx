@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiFetch } from '../lib/api';
 import { 
   Wallet, 
   ArrowUpCircle, 
@@ -12,7 +13,7 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { formatCurrency, cn } from '../lib/utils';
+import { formatCurrency, cn, roundTo2Decimals } from '../lib/utils';
 import { useDataSync } from '../hooks/useDataSync';
 import { useConfirm } from '../hooks/useConfirm';
 
@@ -40,9 +41,9 @@ export default function CashFlow() {
 
   const fetchTransactions = async () => {
     try {
-      const res = await fetch('/api/cash-flow');
+      const res = await apiFetch('/api/cash-flow');
       const data = await res.json();
-      setTransactions(data);
+      setTransactions(Array.isArray(data) ? data : []);
     } catch (error) {
       console.error('Error fetching cash flow:', error);
     } finally {
@@ -61,12 +62,11 @@ export default function CashFlow() {
     if (!formData.amount || !formData.description) return;
 
     try {
-      const res = await fetch('/api/cash-flow', {
+      const res = await apiFetch('/api/cash-flow', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...formData,
-          amount: parseFloat(formData.amount)
+          amount: roundTo2Decimals(parseFloat(formData.amount) || 0)
         })
       });
 
@@ -86,7 +86,7 @@ export default function CashFlow() {
       'Esta acción eliminará el registro de caja. ¿Deseas continuar?',
       async () => {
         try {
-          const res = await fetch(`/api/cash-flow/${id}`, { method: 'DELETE' });
+          const res = await apiFetch(`/api/cash-flow/${id}`, { method: 'DELETE' });
           if (res.ok) fetchTransactions();
         } catch (error) {
           console.error('Error deleting transaction:', error);
@@ -95,11 +95,11 @@ export default function CashFlow() {
     );
   };
 
-  const balance = transactions.reduce((acc, t) => 
+  const balance = roundTo2Decimals((transactions || []).reduce((acc, t) => 
     t.type === 'income' ? acc + t.amount : acc - t.amount, 0
-  );
+  ));
 
-  const filteredTransactions = transactions.filter(t => 
+  const filteredTransactions = (transactions || []).filter(t => 
     t.description.toLowerCase().includes(search.toLowerCase())
   );
 

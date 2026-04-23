@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { apiFetch } from '../lib/api';
 import { 
   Search, 
   Plus, 
@@ -22,7 +23,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Product, Category, AppSettings, Customer } from '../types';
-import { formatCurrency, cn } from '../lib/utils';
+import { formatCurrency, cn, roundTo2Decimals } from '../lib/utils';
 import { useDataSync } from '../hooks/useDataSync';
 import { useConfirm } from '../hooks/useConfirm';
 import jsPDF from 'jspdf';
@@ -101,15 +102,15 @@ export default function POS() {
 
   const fetchData = () => {
     Promise.all([
-      fetch('/api/products').then(res => res.json()),
-      fetch('/api/categories').then(res => res.json()),
-      fetch('/api/settings').then(res => res.json()),
-      fetch('/api/customers').then(res => res.json())
+      apiFetch('/api/products').then(res => res.json()),
+      apiFetch('/api/categories').then(res => res.json()),
+      apiFetch('/api/settings').then(res => res.json()),
+      apiFetch('/api/customers').then(res => res.json())
     ]).then(([productsData, categoriesData, settingsData, customersData]) => {
-      setProducts(productsData);
-      setCategories(categoriesData);
+      setProducts(Array.isArray(productsData) ? productsData : []);
+      setCategories(Array.isArray(categoriesData) ? categoriesData : []);
       setSettings(settingsData);
-      setCustomers(customersData);
+      setCustomers(Array.isArray(customersData) ? customersData : []);
     });
   };
 
@@ -170,7 +171,7 @@ export default function POS() {
         }
 
         // Try serial or serialized product
-        const res = await fetch(`/api/products/by-serial/${trimmedCode}`);
+        const res = await apiFetch(`/api/products/by-serial/${trimmedCode}`);
         if (res.ok) {
           const product = await res.json();
           setSearch(''); 
@@ -218,7 +219,7 @@ export default function POS() {
     */
   }, [isCheckoutOpen, isCustomProductModalOpen, isSerialModalOpen, isAddingCustomer, showTicket]);
 
-  const filteredProducts = products.filter(p => {
+  const filteredProducts = (products || []).filter(p => {
     const matchesSearch = p.name.toLowerCase().includes(search.toLowerCase()) || p.code.toLowerCase().includes(search.toLowerCase());
     const matchesCategory = selectedCategory === 'all' || p.category_id === selectedCategory;
     return matchesSearch && matchesCategory && p.status === 'active';
@@ -235,9 +236,10 @@ export default function POS() {
     if (product.has_serials) {
       // Fetch available serials
       try {
-        const res = await fetch(`/api/products/${product.id}/items`);
+        const res = await apiFetch(`/api/products/${product.id}/items`);
         const items = await res.json();
-        const available = items.filter((i: any) => i.status === 'available');
+        const itemsArray = Array.isArray(items) ? items : [];
+        const available = itemsArray.filter((i: any) => i.status === 'available');
         
         if (available.length === 0) {
           alert('No hay números de serie disponibles para este producto');
@@ -361,7 +363,7 @@ export default function POS() {
     const uncommonProduct = {
       id,
       name: customProductData.name || 'Producto Especial',
-      sale_price: Number(customProductData.price) || 0,
+      sale_price: roundTo2Decimals(Number(customProductData.price) || 0),
       quantity: 1,
       image: 'https://picsum.photos/seed/uncommon/100/100',
       category_id: 'uncommon',
@@ -374,17 +376,17 @@ export default function POS() {
     setCustomProductData({ name: '', price: '' });
   };
 
-  const subtotal = Number(cart.reduce((acc, item) => acc + (item.sale_price * item.quantity), 0).toFixed(2));
-  const cardSurcharge = Number(payments
+  const subtotal = roundTo2Decimals(cart.reduce((acc, item) => acc + (item.sale_price * item.quantity), 0));
+  const cardSurcharge = roundTo2Decimals(payments
     .filter(p => p.method === 'card')
-    .reduce((acc, p) => acc + (p.amount - (p.amount / 1.05)), 0).toFixed(2));
+    .reduce((acc, p) => acc + (p.amount - (p.amount / 1.05)), 0));
   const taxRate = 0;
   const tax = 0;
-  const total = Number((subtotal + cardSurcharge).toFixed(2));
+  const total = roundTo2Decimals(subtotal + cardSurcharge);
 
-  const totalPaid = payments.reduce((acc, p) => acc + p.amount, 0);
-  const pendingAmount = Math.max(0, total - totalPaid);
-  const change = totalPaid > total ? totalPaid - total : 0;
+  const totalPaid = roundTo2Decimals(payments.reduce((acc, p) => acc + p.amount, 0));
+  const pendingAmount = roundTo2Decimals(Math.max(0, total - totalPaid));
+  const change = roundTo2Decimals(totalPaid > total ? totalPaid - total : 0);
 
   const handleCheckout = async () => {
     try {
@@ -404,27 +406,42 @@ export default function POS() {
         warranty: warranty
       };
 
-      const res = await fetch('/api/sales', {
+      const res = await apiFetch('/api/sales', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(saleData)
       });
 
-      const data = await res.json();
-
-      if (res.ok) {
-        setLastSaleId(data.id);
-        setIsQuotation(false);
-        setIsCheckoutOpen(false);
-        setShowTicket(true);
-        // Refresh products to update stock
-        fetch('/api/products').then(res => res.json()).then(setProducts);
-      } else {
-        alert(data.error || 'Error al procesar la venta');
+      if (!res.ok) {
+        let errorMessage = 'Error al procesar la venta';
+        const clonedRes = res.clone();
+        try {
+          const errorData = await res.json();
+          errorMessage = errorData.error || errorData.message || errorMessage;
+        } catch (e) {
+          // If not JSON, it's probably HTML from proxy/failed route
+          console.error('Non-JSON error response:', await clonedRes.text());
+        }
+        throw new Error(errorMessage);
       }
-    } catch (error) {
+
+      const data = await res.json();
+      setLastSaleId(data.id);
+      setIsQuotation(false);
+      setIsCheckoutOpen(false);
+      setShowTicket(true);
+      // Refresh products to update stock
+      try {
+        const prodRes = await apiFetch('/api/products');
+        if (prodRes.ok) {
+          const prodData = await prodRes.json();
+          setProducts(Array.isArray(prodData) ? prodData : []);
+        }
+      } catch (err) {
+        console.error('Error refreshing products:', err);
+      }
+    } catch (error: any) {
       console.error('Error during checkout:', error);
-      alert('Error de conexión al procesar la venta');
+      alert(error.message || 'Error de conexión al procesar la venta');
     }
   };
 
@@ -437,9 +454,8 @@ export default function POS() {
       customer_id: selectedCustomer?.id || null
     };
 
-    const res = await fetch('/api/quotations', {
+    const res = await apiFetch('/api/quotations', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(quotationData)
     });
 
@@ -459,9 +475,8 @@ export default function POS() {
     }
     
     try {
-      const res = await fetch('/api/customers', {
+      const res = await apiFetch('/api/customers', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newCustomer)
       });
 
@@ -1100,7 +1115,7 @@ export default function POS() {
                     addToCart(productByCode);
                   } else {
                     // Try to fetch as serial or find product with serials
-                    fetch(`/api/products/by-serial/${code}`).then(res => {
+                    apiFetch(`/api/products/by-serial/${code}`).then(res => {
                       if (res.ok) return res.json();
                       
                       // If not found by serial, try by code again but for serial components
@@ -1714,7 +1729,7 @@ export default function POS() {
                                     )}
                                     value={p.amount}
                                     onChange={(e) => {
-                                      const val = parseFloat(e.target.value) || 0;
+                                      const val = roundTo2Decimals(parseFloat(e.target.value) || 0);
                                       const newPayments = [...payments];
                                       newPayments[idx].amount = val;
                                       setPayments(newPayments);
